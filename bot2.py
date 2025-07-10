@@ -107,7 +107,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Фото
         if msg.photo:
             file = await context.bot.get_file(msg.photo[-1].file_id)
-            file_url = file.file_path
+            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
             img_text = await extract_text_from_image(file_url)
             if contains_profanity(img_text) or contains_ads(img_text) or contains_money(img_text):
                 await msg.delete()
