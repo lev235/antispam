@@ -1,128 +1,120 @@
-#!/usr/bin/env python3
-import os, re, json, logging, threading, http.server, socketserver
-from pathlib import Path
-from telegram import Update
-from telegram.constants import ParseMode
+import logging
+import re
+from datetime import datetime, timedelta
+from telegram import Update, ChatMember
 from telegram.ext import (
-    ApplicationBuilder, ContextTypes,
-    MessageHandler, CommandHandler,
-    Defaults, filters
+    ApplicationBuilder, MessageHandler, ContextTypes, filters
 )
 
-# ─── Окружение ───
-TOKEN      = os.getenv("BOT_TOKEN")
-PUBLIC_URL = os.getenv("APP_URL") or os.getenv("RENDER_EXTERNAL_URL")
-PORT       = int(os.getenv("PORT", "10000"))
-if not (TOKEN and PUBLIC_URL):
-    raise SystemExit("Set BOT_TOKEN and APP_URL/RENDER_EXTERNAL_URL")
+# --- Логгирование ---
+logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 
-# ─── База слов ───
-BASE = ["бля","бляд","хуй","пизд","еба","еби","ебу","ебат","сука","мудак",
-        "пидор","гандон","шлюха","еблан","залуп","мудок","нахуй",
-        "соси","хуесос","долбаёб","пидар","мразь", "заработ", "пис", "пиш", "лс"]
+# --- Матерные слова ---
+BAD_WORDS = { 'хуй', 'хyй', 'хуя', 'пизда', 'ебать', 'манда', 'мудак', 'сука', 'блядь',
+              'fuck', 'shit', 'asshole', 'fucking', 'bitch', 'bastard', 'nigger', 'faggot' }
 
-def variants(w:str): ch=list(w); return [w, " ".join(ch), "-".join(ch), "_".join(ch)]
-def flex(w:str): return r"\s*[\W_]*".join(map(re.escape, w))
+def build_bad_word_patterns(words: set) -> list:
+    return [re.compile(r'\W{0,2}'.join(re.escape(c) for c in word), re.IGNORECASE) for word in words]
 
-MAT_REGEX  = re.compile("|".join(flex(v) for b in BASE for v in variants(b)), re.I)
-SPAM_REGEX = re.compile(r"(https?://\S+|t\.me/|joinchat|скидк|деш[её]в|подпис)", re.I)
-POSITIVE   = {"спасибо","круто","полезно","супер","great","awesome","thanks"}
+BAD_WORD_PATTERNS = build_bad_word_patterns(BAD_WORDS)
 
-# ─── Состояние ───
-STORE = Path("state.json")
-state = {"rep": {}, "seen_rep": {}, "seen_del": {}}
-if STORE.exists():
-    state.update(json.loads(STORE.read_text("utf-8")))
+# --- Реклама и флуд ---
+AD_KEYWORDS = {'работа', 'заработок', 'деньги', '@', 't.me/', 'в лс', 'в telegram', '+7', '8-9'}
+FLOOD_LIMIT = 3
+FLOOD_INTERVAL = 10  # сек
 
-def save():
-    STORE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+def contains_profanity(text: str) -> bool:
+    return any(p.search(text) for p in BAD_WORD_PATTERNS)
 
-def inc_rep(uid:int, delta:int=1) -> int:
-    uid=str(uid)
-    state["rep"][uid] = state["rep"].get(uid,0) + delta
-    save()
-    return state["rep"][uid]
+def contains_ads(text: str) -> bool:
+    return any(word in text.lower() for word in AD_KEYWORDS)
 
-# ─── Backlog ───
-BACKLOG_LIMIT = 25
-backlog_counter = 0
-backlog_done    = False
+def is_emoji_spam(text: str) -> bool:
+    emoji_pattern = r'[\U0001F300-\U0001FAFF]'
+    return len(re.findall(emoji_pattern, text)) >= 10 or re.search(r'(.)\1{4,}', text)
 
-def in_backlog_phase(): return not backlog_done
-def mark_backlog_processed():
-    global backlog_done
-    backlog_done = True
+def filename_contains_ads(msg) -> bool:
+    return msg.document and msg.document.file_name and any(w in msg.document.file_name.lower() for w in AD_KEYWORDS)
 
-# ─── Handlers ───
-async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    global backlog_counter
-    msg = update.effective_message
-    if not msg or not msg.text:
+def is_flooding(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    now = datetime.now()
+    key = f"flood:{chat_id}:{user_id}"
+    history = [t for t in context.chat_data.get(key, []) if now - t < timedelta(seconds=FLOOD_INTERVAL)]
+    history.append(now)
+    context.chat_data[key] = history
+    return len(history) >= FLOOD_LIMIT
+
+async def is_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    try:
+        m = await context.bot.get_chat_member(chat_id, user_id)
+        return m.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]
+    except Exception as e:
+        logging.warning(f"Ошибка проверки админа: {e}")
+        return False
+
+# --- Обработка сообщений ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.from_user:
         return
 
-    chat_id = str(msg.chat.id)
-    mid     = msg.message_id
-    txt     = msg.text.lower()
+    user_id = msg.from_user.id
+    chat_id = msg.chat.id
+    text = msg.text or msg.caption or ""
+    has_media = msg.photo or msg.video or msg.document or msg.animation
 
-    if in_backlog_phase():
-        backlog_counter += 1
-        if backlog_counter >= BACKLOG_LIMIT:
-            mark_backlog_processed()
-
-    if MAT_REGEX.search(txt) or SPAM_REGEX.search(txt):
-        if mid in state["seen_del"].get(chat_id, {}):
-            return
-        await msg.delete()
-        state.setdefault("seen_del", {}).setdefault(chat_id, {})[mid] = 1
-        save()
+    if await is_admin(chat_id, user_id, context):
         return
 
-    if any(w in txt for w in POSITIVE):
-        if mid in state["seen_rep"].get(chat_id, {}):
+    try:
+        if contains_profanity(text) or contains_ads(text) or is_emoji_spam(text):
+            await msg.delete()
+            logging.info(f"Удалено сообщение от {user_id} (текст)")
             return
-        total = inc_rep(msg.from_user.id)
-        await msg.reply_text(f"👍 Репутация +1 (итого {total})")
-        state.setdefault("seen_rep", {}).setdefault(chat_id, {})[mid] = 1
-        save()
 
-async def cmd_rep(update: Update, _):
-    uid=str(update.effective_user.id)
-    await update.message.reply_text(
-        f"👤 Ваша репутация: <b>{state['rep'].get(uid,0)}</b>"
-    )
+        if has_media and not text.strip():
+            if filename_contains_ads(msg):
+                await msg.delete()
+                logging.info(f"Удалено медиа от {user_id} (реклама в имени файла)")
+                return
+            await msg.delete()
+            logging.info(f"Удалено медиа от {user_id} без текста")
+            return
 
-async def cmd_top(update: Update, _):
-    if not state["rep"]:
-        await update.message.reply_text("Пока пусто."); return
-    top = sorted(state["rep"].items(), key=lambda kv: kv[1], reverse=True)[:10]
-    lines = ["<b>🏆 ТОП-10</b>"] + [
-        f"{i+1}. <a href='tg://user?id={u}'>user_{u}</a> — {s}"
-        for i, (u,s) in enumerate(top)
-    ]
-    await update.message.reply_text("\n".join(lines))
+        if has_media and contains_ads(text):
+            await msg.delete()
+            logging.info(f"Удалено медиа от {user_id} (caption с рекламой)")
+            return
 
-# ─── Telegram App ───
-logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s: %(message)s")
+    except Exception as e:
+        logging.warning(f"Ошибка при удалении: {e}")
 
-app = (
-    ApplicationBuilder()
-    .token(TOKEN)
-    .defaults(Defaults(parse_mode=ParseMode.HTML))
-    .build()
-)
-app.add_handler(CommandHandler("rep", cmd_rep))
-app.add_handler(CommandHandler("top", cmd_top))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    if is_flooding(user_id, chat_id, context):
+        try:
+            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+            await context.bot.send_message(chat_id, f"🚫 @{msg.from_user.username or user_id} забанен за флуд.")
+            logging.info(f"Забанен за флуд: {user_id}")
+        except Exception as e:
+            logging.warning(f"Ошибка при бане: {e}")
 
-# ─── HTTP-сервер для Render (фиктивный порт) ───
+# --- Имитация порта для Render ---
+import threading
+import http.server
+import socketserver
+import os
+
 def fake_webserver():
+    port = int(os.environ.get("PORT", 10000))
     Handler = http.server.SimpleHTTPRequestHandler
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+    with socketserver.TCPServer(("", port), Handler) as httpd:
         httpd.serve_forever()
 
 threading.Thread(target=fake_webserver, daemon=True).start()
 
-# ─── Запуск бота ───
-if __name__ == "__main__":
-    logging.info("🚀 Бот запускается...")
+# --- Запуск бота ---
+if __name__ == '__main__':
+    BOT_TOKEN = os.getenv("BOT_TOKEN")  # рекомендую хранить токен в переменной окружения
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.ALL, handle_message))
+    logging.info("🤖 Бот запущен и готов к работе")
     app.run_polling()
