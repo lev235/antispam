@@ -1,9 +1,11 @@
 import logging
 import re
 from datetime import datetime, timedelta
-from telegram import Update, ChatMember
+import os
+from flask import Flask, request
+from telegram import Update, ChatMember, Bot
 from telegram.ext import (
-    ApplicationBuilder, MessageHandler, ContextTypes, filters
+    Application, Dispatcher, MessageHandler, ContextTypes, filters, CommandHandler
 )
 
 # --- Логгирование ---
@@ -21,7 +23,7 @@ BAD_WORD_PATTERNS = build_bad_word_patterns(BAD_WORDS)
 # --- Реклама и флуд ---
 AD_KEYWORDS = {'работа', 'заработок', 'деньги', '@', 't.me/', 'в лс', 'в telegram', '+7', '8-9'}
 FLOOD_LIMIT = 3
-FLOOD_INTERVAL = 10  # сек
+FLOOD_INTERVAL = 10  # секунд
 
 def contains_profanity(text: str) -> bool:
     return any(p.search(text) for p in BAD_WORD_PATTERNS)
@@ -97,24 +99,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.warning(f"Ошибка при бане: {e}")
 
-# --- Имитация порта для Render ---
-import threading
-import http.server
-import socketserver
-import os
+# --- Flask веб-сервер для webhook ---
+from flask import Flask, request, Response
 
-def fake_webserver():
-    port = int(os.environ.get("PORT", 10000))
-    Handler = http.server.SimpleHTTPRequestHandler
-    with socketserver.TCPServer(("", port), Handler) as httpd:
-        httpd.serve_forever()
+app = Flask(__name__)
 
-threading.Thread(target=fake_webserver, daemon=True).start()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Укажи токен в переменной окружения BOT_TOKEN")
 
-# --- Запуск бота ---
-if __name__ == '__main__':
-    BOT_TOKEN = os.getenv("BOT_TOKEN")  # рекомендую хранить токен в переменной окружения
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
-    logging.info("🤖 Бот запущен и готов к работе")
-    app.run_polling()
+bot = Bot(token=BOT_TOKEN)
+application = Application.builder().bot(bot).build()
+
+# Регистрируем обработчик сообщений
+application.add_handler(MessageHandler(filters.ALL, handle_message))
+
+@app.route("/")
+def index():
+    return "Бот работает"
+
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook_handler():
+    update = Update.de_json(request.get_json(force=True), bot)
+    application.process_update(update)
+    return Response("ok", status=200)
+
+if name == "__main__":
+    # Запускаем Flask сервер (Render автоматически задаст PORT)
+    port = int(os.environ.get("PORT", 5000))
+    logging.info(f"Запуск веб-сервера на порту {port}")
+    app.run(host="0.0.0.0", port=port)
