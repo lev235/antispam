@@ -109,10 +109,10 @@ async def main():
     await site.start()
 
     logging.info("✅ Сервер запущен")
+    await app.initialize()
     await app.start()
-    await app.updater.start_polling()  # Необязательный опрос
+    await app.updater.start_polling()
     await app.updater.idle()
-
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
