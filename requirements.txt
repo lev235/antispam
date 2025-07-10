@@ -4,4 +4,3 @@ Flask
 httpx
 Pillow
 pytesseract
-easyocr
