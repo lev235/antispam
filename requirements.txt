@@ -4,4 +4,4 @@ Flask
 httpx
 Pillow
 pytesseract
-easyocr torch
+pip install easyocr torch
