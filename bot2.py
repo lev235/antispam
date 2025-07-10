@@ -127,7 +127,7 @@ def telegram_webhook():
         abort(405)
 
 # --- Запуск приложения ---
-if name == "__main__":
+if __name__ == "__main__":
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     DOMAIN = os.getenv("DOMAIN")  # Например: https://antispam-xxxxx.onrender.com
 
