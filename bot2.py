@@ -27,7 +27,7 @@ def build_bad_word_patterns(words: set) -> list:
 BAD_WORD_PATTERNS = build_bad_word_patterns(BAD_WORDS)
 
 # --- Реклама и флуд ---
-AD_KEYWORDS = {'работа', 'заработок', 'деньги', '@', 't.me/', 'в лс', 'в telegram', '+7', '8-9'}
+AD_KEYWORDS = {'работа', 'заработок', 'деньги', '@', 't.me/', 'в лс', 'в telegram', '+7', '8-9', "https://"}
 FLOOD_LIMIT = 3
 FLOOD_INTERVAL = 10  # секунд
 
