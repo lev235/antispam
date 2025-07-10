@@ -106,13 +106,19 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Фото
         if msg.photo:
-            file = await context.bot.get_file(msg.photo[-1].file_id)
-            file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-            img_text = await extract_text_from_image(file_url)
-            if contains_profanity(img_text) or contains_ads(img_text) or contains_money(img_text):
-                await msg.delete()
-                logging.info(f"Удалено фото от {user_id} (по изображению)")
-                return
+    file = await context.bot.get_file(msg.photo[-1].file_id)
+    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+    img_text = await extract_text_from_image(file_url)
+
+    logging.info(f"Распознанный текст из фото: {img_text[:200]}")  # лог первых 200 символов
+
+    if img_text:
+        # Усиленная проверка рекламы: ищем слова из AD_KEYWORDS через регулярку, игнорируем регистр
+        ad_pattern = re.compile(r'(' + '|'.join(re.escape(word) for word in AD_KEYWORDS) + r')', re.IGNORECASE)
+        if contains_profanity(img_text) or ad_pattern.search(img_text) or contains_money(img_text):
+            await msg.delete()
+            logging.info(f"Удалено фото от {user_id} (по изображению)")
+            return
 
     except Exception as e:
         logging.warning(f"Ошибка при удалении: {e}")
