@@ -1,145 +1,128 @@
-import logging
-import re
-from datetime import datetime, timedelta
-from telegram import Update, ChatMember
+#!/usr/bin/env python3
+import os, re, json, logging, threading, http.server, socketserver
+from pathlib import Path
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
-    ApplicationBuilder, MessageHandler, ContextTypes, filters
+    ApplicationBuilder, ContextTypes,
+    MessageHandler, CommandHandler,
+    Defaults, filters
 )
 
-# --- Логгирование ---
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO
+# ─── Окружение ───
+TOKEN      = os.getenv("BOT_TOKEN")
+PUBLIC_URL = os.getenv("APP_URL") or os.getenv("RENDER_EXTERNAL_URL")
+PORT       = int(os.getenv("PORT", "10000"))
+if not (TOKEN and PUBLIC_URL):
+    raise SystemExit("Set BOT_TOKEN and APP_URL/RENDER_EXTERNAL_URL")
+
+# ─── База слов ───
+BASE = ["бля","бляд","хуй","пизд","еба","еби","ебу","ебат","сука","мудак",
+        "пидор","гандон","шлюха","еблан","залуп","мудок","нахуй",
+        "соси","хуесос","долбаёб","пидар","мразь", "заработ", "пис", "пиш", "лс"]
+
+def variants(w:str): ch=list(w); return [w, " ".join(ch), "-".join(ch), "_".join(ch)]
+def flex(w:str): return r"\s*[\W_]*".join(map(re.escape, w))
+
+MAT_REGEX  = re.compile("|".join(flex(v) for b in BASE for v in variants(b)), re.I)
+SPAM_REGEX = re.compile(r"(https?://\S+|t\.me/|joinchat|скидк|деш[её]в|подпис)", re.I)
+POSITIVE   = {"спасибо","круто","полезно","супер","great","awesome","thanks"}
+
+# ─── Состояние ───
+STORE = Path("state.json")
+state = {"rep": {}, "seen_rep": {}, "seen_del": {}}
+if STORE.exists():
+    state.update(json.loads(STORE.read_text("utf-8")))
+
+def save():
+    STORE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def inc_rep(uid:int, delta:int=1) -> int:
+    uid=str(uid)
+    state["rep"][uid] = state["rep"].get(uid,0) + delta
+    save()
+    return state["rep"][uid]
+
+# ─── Backlog ───
+BACKLOG_LIMIT = 25
+backlog_counter = 0
+backlog_done    = False
+
+def in_backlog_phase(): return not backlog_done
+def mark_backlog_processed():
+    global backlog_done
+    backlog_done = True
+
+# ─── Handlers ───
+async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global backlog_counter
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+
+    chat_id = str(msg.chat.id)
+    mid     = msg.message_id
+    txt     = msg.text.lower()
+
+    if in_backlog_phase():
+        backlog_counter += 1
+        if backlog_counter >= BACKLOG_LIMIT:
+            mark_backlog_processed()
+
+    if MAT_REGEX.search(txt) or SPAM_REGEX.search(txt):
+        if mid in state["seen_del"].get(chat_id, {}):
+            return
+        await msg.delete()
+        state.setdefault("seen_del", {}).setdefault(chat_id, {})[mid] = 1
+        save()
+        return
+
+    if any(w in txt for w in POSITIVE):
+        if mid in state["seen_rep"].get(chat_id, {}):
+            return
+        total = inc_rep(msg.from_user.id)
+        await msg.reply_text(f"👍 Репутация +1 (итого {total})")
+        state.setdefault("seen_rep", {}).setdefault(chat_id, {})[mid] = 1
+        save()
+
+async def cmd_rep(update: Update, _):
+    uid=str(update.effective_user.id)
+    await update.message.reply_text(
+        f"👤 Ваша репутация: <b>{state['rep'].get(uid,0)}</b>"
+    )
+
+async def cmd_top(update: Update, _):
+    if not state["rep"]:
+        await update.message.reply_text("Пока пусто."); return
+    top = sorted(state["rep"].items(), key=lambda kv: kv[1], reverse=True)[:10]
+    lines = ["<b>🏆 ТОП-10</b>"] + [
+        f"{i+1}. <a href='tg://user?id={u}'>user_{u}</a> — {s}"
+        for i, (u,s) in enumerate(top)
+    ]
+    await update.message.reply_text("\n".join(lines))
+
+# ─── Telegram App ───
+logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s: %(message)s")
+
+app = (
+    ApplicationBuilder()
+    .token(TOKEN)
+    .defaults(Defaults(parse_mode=ParseMode.HTML))
+    .build()
 )
+app.add_handler(CommandHandler("rep", cmd_rep))
+app.add_handler(CommandHandler("top", cmd_top))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-# --- Матерные слова ---
-BAD_WORDS = {
-    'хуй', 'хyй', 'хуи', 'хуя', 'хуе', 'хуё', 'хуй', 'хуем', 'хуев', 'хуёв',
-    'пизда', 'пиздец', 'пизду', 'пизд', 'пезд', 'пиздюк',
-    'ебать', 'ебан', 'ёб', 'ебло', 'еблан', 'ебу', 'ебись', 'ебач', 'ебля',
-    'манда', 'мудила', 'мудло', 'мудак', 'долбоеб', 'долбаеб',
-    'сука', 'суко', 'суки', 'сукин', 'блядь', 'бля', 'бляд', 'блят', 'блядина',
-    'fuck', 'shit', 'asshole', 'fucking', 'bitch', 'bastard', 'nigger', 'faggot',
-    "заработок", "заработком", "зароботка", "зарааботки", 
-}
+# ─── HTTP-сервер для Render (фиктивный порт) ───
+def fake_webserver():
+    Handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        httpd.serve_forever()
 
-def build_bad_word_patterns(words: set) -> list:
-    patterns = []
-    for word in words:
-        spaced = r'\W{0,2}'.join(re.escape(c) for c in word)
-        patterns.append(re.compile(spaced, re.IGNORECASE))
-    return patterns
+threading.Thread(target=fake_webserver, daemon=True).start()
 
-BAD_WORD_PATTERNS = build_bad_word_patterns(BAD_WORDS)
-
-# --- Рекламные слова ---
-AD_KEYWORDS = {
-    'работа', 'заработок', 'удалённо', 'деньги', '1400₽', 'в лс', 'в личные',
-    'пишите', 'подпишись', 'в телеграм', 'в telegram', 'в tg', 'whatsapp',
-    'номер', 'телефон', 'водительские права', 'права', '@', 't.me/', '+7', '8-9'
-}
-
-def contains_profanity(text: str) -> bool:
-    for pattern in BAD_WORD_PATTERNS:
-        if pattern.search(text):
-            return True
-    return False
-
-def is_emoji_spam(text: str) -> bool:
-    emoji_pattern = r'[\U0001F300-\U0001FAFF]'
-    emojis = re.findall(emoji_pattern, text)
-    if len(emojis) >= 10:
-        return True
-    if re.search(r'(.)\1{4,}', text):
-        return True
-    return False
-
-def contains_ads(text: str) -> bool:
-    lower_text = text.lower()
-    return any(word in lower_text for word in AD_KEYWORDS)
-
-def filename_contains_ads(message) -> bool:
-    doc = message.document
-    if not doc or not doc.file_name:
-        return False
-    lower_name = doc.file_name.lower()
-    return any(word in lower_name for word in AD_KEYWORDS)
-
-# --- Антифлуд ---
-FLOOD_LIMIT = 3
-FLOOD_INTERVAL = 10  # секунд
-
-def is_flooding(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    now = datetime.now()
-    key = f"flood:{chat_id}:{user_id}"
-    history = context.chat_data.get(key, [])
-    history = [t for t in history if now - t < timedelta(seconds=FLOOD_INTERVAL)]
-    history.append(now)
-    context.chat_data[key] = history
-    return len(history) >= FLOOD_LIMIT
-
-# --- Проверка: является ли пользователь админом ---
-async def is_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        return member.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]
-    except Exception as e:
-        logging.warning(f"Ошибка при проверке админа: {e}")
-        return False
-
-# --- Обработка сообщений ---
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message or not message.from_user:
-        return
-
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    text = message.text or message.caption or ""
-    has_media = message.photo or message.video or message.document or message.animation
-
-    if await is_admin(chat_id, user_id, context):
-        return
-
-    try:
-        if contains_profanity(text) or contains_ads(text) or is_emoji_spam(text):
-            await message.delete()
-            logging.info(f"Удалено сообщение от {user_id} (текст)")
-            return
-
-        if has_media and not text.strip():
-            if filename_contains_ads(message):
-                await message.delete()
-                logging.info(f"Удалено медиа от {user_id} (имя файла с рекламой)")
-                return
-
-            await message.delete()
-            logging.info(f"Удалено медиа от {user_id} без текста")
-            return
-
-        if has_media and contains_ads(text):
-            await message.delete()
-            logging.info(f"Удалено медиа от {user_id} (caption с рекламой)")
-            return
-
-    except Exception as e:
-        logging.warning(f"Ошибка при удалении: {e}")
-
-    # Антифлуд
-    if is_flooding(user_id, chat_id, context):
-        try:
-            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-            await context.bot.send_message(chat_id, f"🚫 Пользователь @{message.from_user.username or user_id} забанен за флуд.")
-            logging.info(f"Пользователь {user_id} забанен за флуд")
-        except Exception as e:
-            logging.warning(f"Ошибка при бане: {e}")
-
-# --- Запуск бота ---
-if __name__ == '__main__':
-    BOT_TOKEN = "7871463826:AAHQyxV0BtGtieuqNUHtSUb60A5vWU6HKWk"
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
-
-    print("🤖 Бот запущен...")
+# ─── Запуск бота ───
+if __name__ == "__main__":
+    logging.info("🚀 Бот запускается...")
     app.run_polling()
