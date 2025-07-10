@@ -9,7 +9,8 @@ from telegram.ext import (
     ApplicationBuilder, MessageHandler, ContextTypes, filters
 )
 
-import easyocr
+from PIL import Image
+import pytesseract
 import aiohttp
 from io import BytesIO
 
@@ -34,23 +35,25 @@ AD_KEYWORDS = {'работа', 'заработок', 'деньги', '@', 't.me/
 FLOOD_LIMIT = 3
 FLOOD_INTERVAL = 10  # секунд
 
-# --- Построение паттернов ---
-def build_bad_patterns(words):
-    return [re.compile(r'\W{0,3}'.join(re.escape(c) for c in word), re.IGNORECASE) for word in words]
-
-BAD_PATTERNS = build_bad_patterns(BAD_WORDS)
-
 # --- Проверки текста ---
-def contains_profanity(text):
-    return any(p.search(text) for p in BAD_PATTERNS)
+def contains_profanity(text: str) -> bool:
+    text = text.lower()
+    for word in BAD_WORDS:
+        if word in text:
+            return True
+    return False
 
-def contains_ads(text):
-    return any(word in text.lower() for word in AD_KEYWORDS)
+def contains_ads(text: str) -> bool:
+    text = text.lower()
+    for word in AD_KEYWORDS:
+        if word in text:
+            return True
+    return False
 
-def contains_money(text):
+def contains_money(text: str) -> bool:
     return bool(re.search(r'\b\d{2,}\s?(р|руб|рублей)\b', text.lower()))
 
-def is_emoji_spam(text):
+def is_emoji_spam(text: str) -> bool:
     return len(re.findall(r'[\U0001F300-\U0001FAFF]', text)) > 10
 
 def is_flooding(user_id, chat_id, context):
@@ -70,22 +73,19 @@ async def is_admin(chat_id, user_id, context):
         logging.warning(f"Ошибка при проверке админа: {e}")
         return False
 
-# --- Инициализация easyocr (один раз) ---
-reader = easyocr.Reader(['ru', 'en'], gpu=False)
-
-# --- Распознавание текста с картинки через easyocr ---
+# --- Распознавание текста с картинки ---
 async def extract_text_from_image(file_url):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(file_url) as resp:
                 if resp.status == 200:
                     img_bytes = await resp.read()
-                    image = BytesIO(img_bytes)
-                    result = reader.readtext(image, detail=0)
-                    text = ' '.join(result)
+                    image = Image.open(BytesIO(img_bytes))
+                    text = pytesseract.image_to_string(image, lang='rus+eng')
+                    logging.info(f"Текст с изображения: {text.strip()}")
                     return text
     except Exception as e:
-        logging.warning(f"Ошибка easyocr: {e}")
+        logging.warning(f"Ошибка распознавания изображения: {e}")
     return ""
 
 # --- Обработка сообщений ---
@@ -98,40 +98,59 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = msg.from_user.id
     text = msg.text or msg.caption or ""
 
+    logging.info(f"Сообщение от {user_id}: {text}")
+
     if await is_admin(chat_id, user_id, context):
+        logging.info(f"Пользователь {user_id} - админ, пропускаем")
         return
 
     try:
-        # Проверка текста и подписи
-        if contains_profanity(text) or contains_ads(text) or contains_money(text) or is_emoji_spam(text):
+        # Проверка текста
+        if contains_profanity(text):
+            logging.info(f"Обнаружен мат в тексте: {text}")
             await msg.delete()
-            logging.info(f"Удалено сообщение от {user_id} (по тексту)")
+            return
+        if contains_ads(text):
+            logging.info(f"Обнаружена реклама в тексте: {text}")
+            await msg.delete()
+            return
+        if contains_money(text):
+            logging.info(f"Обнаружены деньги в тексте: {text}")
+            await msg.delete()
+            return
+        if is_emoji_spam(text):
+            logging.info(f"Обнаружен спам эмодзи в тексте")
+            await msg.delete()
             return
 
-        # Проверка фото
+        # Проверка фото (берём самое большое)
         if msg.photo:
             file = await context.bot.get_file(msg.photo[-1].file_id)
             file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+            logging.info(f"Получен URL фото: {file_url}")
             img_text = await extract_text_from_image(file_url)
-
-            logging.info(f"Распознанный текст из фото: {img_text[:200]}")
-
-            if img_text:
-                ad_pattern = re.compile(r'(' + '|'.join(re.escape(word) for word in AD_KEYWORDS) + r')', re.IGNORECASE)
-                if contains_profanity(img_text) or ad_pattern.search(img_text) or contains_money(img_text):
-                    await msg.delete()
-                    logging.info(f"Удалено фото от {user_id} (по изображению)")
-                    return
+            if contains_profanity(img_text):
+                logging.info(f"Обнаружен мат на фото, удаляем")
+                await msg.delete()
+                return
+            if contains_ads(img_text):
+                logging.info(f"Обнаружена реклама на фото, удаляем")
+                await msg.delete()
+                return
+            if contains_money(img_text):
+                logging.info(f"Обнаружены деньги на фото, удаляем")
+                await msg.delete()
+                return
 
     except Exception as e:
-        logging.warning(f"Ошибка при удалении: {e}")
+        logging.warning(f"Ошибка при обработке сообщения: {e}")
 
-    # Проверка на флуд
+    # Проверка флуда
     if is_flooding(user_id, chat_id, context):
         try:
             await context.bot.ban_chat_member(chat_id, user_id)
             await context.bot.send_message(chat_id, f"🚫 @{msg.from_user.username or user_id} забанен за флуд.")
-            logging.info(f"Забанен {user_id}")
+            logging.info(f"Забанен {user_id} за флуд")
         except Exception as e:
             logging.warning(f"Ошибка при бане: {e}")
 
@@ -162,6 +181,7 @@ async def main():
     await site.start()
 
     logging.info("✅ Сервер запущен")
+
     await app.initialize()
     await app.start()
     await app.updater.idle()
