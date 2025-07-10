@@ -150,5 +150,5 @@ if __name__ == "__main__":
         listen="0.0.0.0",
         port=port,
         url_path=BOT_TOKEN,
-        webhook_url=f"https://yourappname.onrender.com/{BOT_TOKEN}",  # ← замени
+        webhook_url=f"https://antispam-i02j.onrender.com/{BOT_TOKEN}",  # ← замени
     )
