@@ -111,14 +111,17 @@ async def main():
 
     runner = web.AppRunner(aio_app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8443)))
     await site.start()
 
     logging.info("✅ Сервер запущен")
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
-    await app.updater.idle()
-
+    webhook_url = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/{BOT_TOKEN}"
+    await app.bot.set_webhook(url=webhook_url)
+    await app.start()
+    await app.updater.start()
+    await app.wait_until_shutdown()
+    await app.stop()
 if __name__ == "__main__":
     asyncio.run(main())
