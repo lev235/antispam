@@ -23,7 +23,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("❌ Укажи переменную окружения BOT_TOKEN")
 
-# --- Ненормативная лексика и реклама ---
+# --- Настройки ---
 BAD_WORDS = {
     'хуй', 'пизда', 'ебать', 'манда', 'сука', 'блядь', 'мудила',
     'хуесос', 'еблан', 'соси', 'пидор', 'залупа', 'шлюха', 'гандон',
@@ -32,13 +32,16 @@ BAD_WORDS = {
 }
 AD_KEYWORDS = {'работа', 'заработок', 'деньги', '@', 't.me/', '+7', '8-9', "https://"}
 
+FLOOD_LIMIT = 3
+FLOOD_INTERVAL = 10  # секунд
+
+# --- Построение паттернов ---
 def build_bad_patterns(words):
     return [re.compile(r'\W{0,3}'.join(re.escape(c) for c in word), re.IGNORECASE) for word in words]
 
 BAD_PATTERNS = build_bad_patterns(BAD_WORDS)
-FLOOD_LIMIT = 3
-FLOOD_INTERVAL = 10  # сек
 
+# --- Проверки текста ---
 def contains_profanity(text):
     return any(p.search(text) for p in BAD_PATTERNS)
 
@@ -59,6 +62,7 @@ def is_flooding(user_id, chat_id, context):
     context.chat_data[key] = history
     return len(history) >= FLOOD_LIMIT
 
+# --- Проверка администратора ---
 async def is_admin(chat_id, user_id, context):
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
@@ -67,6 +71,7 @@ async def is_admin(chat_id, user_id, context):
         logging.warning(f"Ошибка при проверке админа: {e}")
         return False
 
+# --- Распознавание текста с картинки ---
 async def extract_text_from_image(file_url):
     try:
         async with aiohttp.ClientSession() as session:
@@ -79,6 +84,7 @@ async def extract_text_from_image(file_url):
         logging.warning(f"Ошибка распознавания изображения: {e}")
     return ""
 
+# --- Обработка сообщений ---
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.from_user:
@@ -92,23 +98,26 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Проверка текста и подписи
+        # Текст и подпись
         if contains_profanity(text) or contains_ads(text) or contains_money(text) or is_emoji_spam(text):
             await msg.delete()
             logging.info(f"Удалено сообщение от {user_id} (по тексту)")
             return
 
-        # Проверка текста на изображении
+        # Фото
         if msg.photo:
             file = await context.bot.get_file(msg.photo[-1].file_id)
-            img_text = await extract_text_from_image(file.file_path)
+            file_url = file.file_path
+            img_text = await extract_text_from_image(file_url)
             if contains_profanity(img_text) or contains_ads(img_text) or contains_money(img_text):
                 await msg.delete()
                 logging.info(f"Удалено фото от {user_id} (по изображению)")
                 return
-    except Exception as e:
-        logging.warning(f"Ошибка удаления сообщения: {e}")
 
+    except Exception as e:
+        logging.warning(f"Ошибка при удалении: {e}")
+
+    # Флуд
     if is_flooding(user_id, chat_id, context):
         try:
             await context.bot.ban_chat_member(chat_id, user_id)
@@ -117,7 +126,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.warning(f"Ошибка при бане: {e}")
 
-# --- aiohttp сервер ---
+# --- aiohttp сервер и Webhook ---
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.ALL, handle))
