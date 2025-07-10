@@ -79,7 +79,12 @@ async def extract_text_from_image(file_url):
                 if resp.status == 200:
                     img_bytes = await resp.read()
                     image = Image.open(BytesIO(img_bytes))
-                    return pytesseract.image_to_string(image, lang='rus+eng')
+                    # Укажи путь к tessdata, если требуется
+                    return pytesseract.image_to_string(
+                        image,
+                        lang='rus+eng',
+                        config='--tessdata-dir /usr/local/share/tessdata/'
+                    )
     except Exception as e:
         logging.warning(f"Ошибка распознавания изображения: {e}")
     return ""
@@ -110,9 +115,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
             img_text = await extract_text_from_image(file_url)
 
-            logging.info(f"Распознанный текст из фото: {img_text[:200]}")  # первые 200 символов
+            logging.info(f"Распознанный текст из фото: {img_text[:200]}")  # лог первых 200 символов
 
             if img_text:
+                # Усиленная проверка рекламы по распознанному тексту
                 ad_pattern = re.compile(r'(' + '|'.join(re.escape(word) for word in AD_KEYWORDS) + r')', re.IGNORECASE)
                 if contains_profanity(img_text) or ad_pattern.search(img_text) or contains_money(img_text):
                     await msg.delete()
