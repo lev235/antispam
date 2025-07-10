@@ -1,18 +1,21 @@
 import os
 import re
 import logging
-import asyncio
 from datetime import datetime, timedelta
 
 from flask import Flask, request, abort
 from telegram import Update, ChatMember
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, MessageHandler, ContextTypes, filters
+)
 
+# --- Логгирование ---
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
 
+# --- Матерные слова ---
 BAD_WORDS = {
     'хуй', 'хyй', 'хуя', 'пизда', 'ебать', 'манда', 'мудак', 'сука', 'блядь',
     'fuck', 'shit', 'asshole', 'fucking', 'bitch', 'bastard', 'nigger', 'faggot'
@@ -23,9 +26,10 @@ def build_bad_word_patterns(words: set) -> list:
 
 BAD_WORD_PATTERNS = build_bad_word_patterns(BAD_WORDS)
 
+# --- Реклама и флуд ---
 AD_KEYWORDS = {'работа', 'заработок', 'деньги', '@', 't.me/', 'в лс', 'в telegram', '+7', '8-9'}
 FLOOD_LIMIT = 3
-FLOOD_INTERVAL = 10  # seconds
+FLOOD_INTERVAL = 10  # секунд
 
 def contains_profanity(text: str) -> bool:
     return any(p.search(text) for p in BAD_WORD_PATTERNS)
@@ -60,6 +64,7 @@ async def is_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYP
         logging.warning(f"Ошибка проверки админа: {e}")
         return False
 
+# --- Обработка сообщений ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.from_user:
@@ -104,35 +109,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.warning(f"Ошибка при бане: {e}")
 
+# --- Flask-сервер ---
 app = Flask(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    logging.error("Не задан токен бота в переменной окружения BOT_TOKEN!")
-    exit(1)
+@app.route("/")
+def ping():
+    logging.info("✅ Пинг получен")
+    return "Бот работает!", 200
 
-telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
-telegram_app.add_handler(MessageHandler(filters.ALL, handle_message))
-
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+@app.route(f"/{os.getenv('BOT_TOKEN')}", methods=["POST"])
 def telegram_webhook():
     if request.method == "POST":
         update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        asyncio.create_task(telegram_app.update_queue.put(update))
+        telegram_app.create_task(telegram_app.update_queue.put(update))
         return "OK"
     else:
         abort(405)
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8443))
+# --- Запуск приложения ---
+if name == "__main__":
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    DOMAIN = os.getenv("DOMAIN")  # Например: https://antispam-xxxxx.onrender.com
 
-    # Разовая установка webhook (раскомментируй и пропиши свой URL, затем закомментируй)
-    # webhook_url = f"https://yourdomain.com/{BOT_TOKEN}"
-    # telegram_app.bot.set_webhook(webhook_url)
+    if not BOT_TOKEN or not DOMAIN:
+        logging.error("❌ Переменные окружения BOT_TOKEN и DOMAIN обязательны!")
+        exit(1)
 
+    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+    telegram_app.add_handler(MessageHandler(filters.ALL, handle_message))
+
+    # Установка webhook
+    telegram_app.bot.delete_webhook()
+    telegram_app.bot.set_webhook(url=f"{DOMAIN}/{BOT_TOKEN}")
+    logging.info("📡 Вебхук установлен")
+
+    port = int(os.environ.get("PORT", 10000))
     telegram_app.run_webhook(
         listen="0.0.0.0",
         port=port,
         url_path=BOT_TOKEN,
-        webhook_url=f"https://antispam-i02j.onrender.com/{BOT_TOKEN}",  # <- замени на URL твоего хоста
+        webhook_url=f"{DOMAIN}/{BOT_TOKEN}",
     )
