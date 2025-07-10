@@ -9,8 +9,7 @@ from telegram.ext import (
     ApplicationBuilder, MessageHandler, ContextTypes, filters
 )
 
-from PIL import Image
-import pytesseract
+import easyocr
 import aiohttp
 from io import BytesIO
 
@@ -71,25 +70,22 @@ async def is_admin(chat_id, user_id, context):
         logging.warning(f"Ошибка при проверке админа: {e}")
         return False
 
-# --- Распознавание текста с картинки ---
+# --- Инициализация easyocr (один раз) ---
+reader = easyocr.Reader(['ru', 'en'], gpu=False)
+
+# --- Распознавание текста с картинки через easyocr ---
 async def extract_text_from_image(file_url):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(file_url) as resp:
                 if resp.status == 200:
                     img_bytes = await resp.read()
-                    image = Image.open(BytesIO(img_bytes))
-
-                    # Указать путь к бинарнику tesseract (для Mac)
-                    pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"
-
-                    # Указать путь к tessdata, если файл rus.traineddata лежит в папке проекта
-                    tessdata_dir = os.path.join(os.getcwd(), "tessdata")
-                    config = f'--tessdata-dir "{tessdata_dir}"'
-
-                    return pytesseract.image_to_string(image, lang='rus+eng', config=config)
+                    image = BytesIO(img_bytes)
+                    result = reader.readtext(image, detail=0)
+                    text = ' '.join(result)
+                    return text
     except Exception as e:
-        logging.warning(f"Ошибка распознавания изображения: {e}")
+        logging.warning(f"Ошибка easyocr: {e}")
     return ""
 
 # --- Обработка сообщений ---
@@ -106,13 +102,13 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Текст и подпись
+        # Проверка текста и подписи
         if contains_profanity(text) or contains_ads(text) or contains_money(text) or is_emoji_spam(text):
             await msg.delete()
             logging.info(f"Удалено сообщение от {user_id} (по тексту)")
             return
 
-        # Фото
+        # Проверка фото
         if msg.photo:
             file = await context.bot.get_file(msg.photo[-1].file_id)
             file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
@@ -130,7 +126,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning(f"Ошибка при удалении: {e}")
 
-    # Флуд
+    # Проверка на флуд
     if is_flooding(user_id, chat_id, context):
         try:
             await context.bot.ban_chat_member(chat_id, user_id)

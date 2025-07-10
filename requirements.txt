@@ -4,3 +4,4 @@ Flask
 httpx
 Pillow
 pytesseract
+easyocr torch
