@@ -2,7 +2,6 @@ import os
 import re
 import logging
 from datetime import datetime, timedelta
-
 from flask import Flask, request, abort
 from telegram import Update, ChatMember
 from telegram.ext import (
@@ -10,19 +9,20 @@ from telegram.ext import (
 )
 
 # --- Логгирование ---
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 
-# --- Матерные слова ---
+# --- Расширенный список русского мата ---
 BAD_WORDS = {
-    'хуй', 'хyй', 'хуя', 'пизда', 'ебать', 'манда', 'мудак', 'сука', 'блядь',
-    'fuck', 'shit', 'asshole', 'fucking', 'bitch', 'bastard', 'nigger', 'faggot'
+    'хуй', 'хyй', 'хуи', 'хуя', 'хую', 'хуем', 'пизда', 'пиздец', 'пизду', 'пёзд', 'пидор',
+    'ебать', 'ебал', 'ебу', 'ёб', 'ебло', 'ебись', 'бля', 'блядь', 'блядина', 'сука', 'сучка',
+    'гандон', 'манда', 'мандовошка', 'жопа', 'жопу', 'мудак', 'мудила', 'соси', 'сосать'
 }
 
+# --- Обходы через символы ---
+SEPARATORS = r"[ .,!@₽*&?/\\|~#%^:;‘’'`\"“”$begin:math:display$$end:math:display$(){}<>\-=+№€$§]{0,2}"
+
 def build_bad_word_patterns(words: set) -> list:
-    return [re.compile(r'\W{0,2}'.join(re.escape(c) for c in word), re.IGNORECASE) for word in words]
+    return [re.compile(SEPARATORS.join(re.escape(c) for c in word), re.IGNORECASE) for word in words]
 
 BAD_WORD_PATTERNS = build_bad_word_patterns(BAD_WORDS)
 
@@ -42,11 +42,7 @@ def is_emoji_spam(text: str) -> bool:
     return len(re.findall(emoji_pattern, text)) >= 10 or re.search(r'(.)\1{4,}', text)
 
 def filename_contains_ads(msg) -> bool:
-    return (
-        msg.document
-        and msg.document.file_name
-        and any(w in msg.document.file_name.lower() for w in AD_KEYWORDS)
-    )
+    return msg.document and msg.document.file_name and any(w in msg.document.file_name.lower() for w in AD_KEYWORDS)
 
 def is_flooding(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     now = datetime.now()
@@ -58,8 +54,8 @@ def is_flooding(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE) 
 
 async def is_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        return member.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]
+        m = await context.bot.get_chat_member(chat_id, user_id)
+        return m.status in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]
     except Exception as e:
         logging.warning(f"Ошибка проверки админа: {e}")
         return False
@@ -109,44 +105,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.warning(f"Ошибка при бане: {e}")
 
-# --- Flask-сервер ---
+# --- Flask сервер для webhook + пинг ---
 app = Flask(__name__)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
-@app.route("/")
-def ping():
-    logging.info("✅ Пинг получен")
-    return "Бот работает!", 200
+telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+telegram_app.add_handler(MessageHandler(filters.ALL, handle_message))
 
-@app.route(f"/{os.getenv('BOT_TOKEN')}", methods=["POST"])
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-        telegram_app.create_task(telegram_app.update_queue.put(update))
-        return "OK"
-    else:
-        abort(405)
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    telegram_app.create_task(telegram_app.update_queue.put(update))
+    return "OK"
 
-# --- Запуск приложения ---
+@app.route("/ping", methods=["GET"])
+def ping():
+    logging.info("Получен ping-запрос от UptimeRobot")
+    return "pong"
+
 if __name__ == "__main__":
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    DOMAIN = os.getenv("DOMAIN")  # Например: https://antispam-xxxxx.onrender.com
-
-    if not BOT_TOKEN or not DOMAIN:
-        logging.error("❌ Переменные окружения BOT_TOKEN и DOMAIN обязательны!")
+    port = int(os.environ.get("PORT", 10000))
+    if not RENDER_EXTERNAL_URL:
+        logging.error("Не задан RENDER_EXTERNAL_URL!")
         exit(1)
 
-    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
-    telegram_app.add_handler(MessageHandler(filters.ALL, handle_message))
-
-    # Установка webhook
-    telegram_app.bot.delete_webhook()
-    telegram_app.bot.set_webhook(url=f"{DOMAIN}/{BOT_TOKEN}")
-    logging.info("📡 Вебхук установлен")
-
-    port = int(os.environ.get("PORT", 10000))
     telegram_app.run_webhook(
         listen="0.0.0.0",
         port=port,
         url_path=BOT_TOKEN,
-        webhook_url=f"{DOMAIN}/{BOT_TOKEN}",
+        webhook_url=f"{RENDER_EXTERNAL_URL}/{BOT_TOKEN}"
     )
