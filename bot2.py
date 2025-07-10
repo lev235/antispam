@@ -129,7 +129,7 @@ def telegram_webhook():
     else:
         abort(405)
 
-if name == "__main__":
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8443))
 
     # Устанавливаем webhook (делать 1 раз, потом можно закомментировать)
