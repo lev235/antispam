@@ -9,6 +9,11 @@ from telegram.ext import (
     ApplicationBuilder, MessageHandler, ContextTypes, filters
 )
 
+from PIL import Image
+import pytesseract
+import aiohttp
+from io import BytesIO
+
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
@@ -21,7 +26,9 @@ if not BOT_TOKEN:
 # --- Ненормативная лексика и реклама ---
 BAD_WORDS = {
     'хуй', 'пизда', 'ебать', 'манда', 'сука', 'блядь', 'мудила',
-    'хуесос', 'еблан', 'соси', 'пидор', 'залупа', 'шлюха', 'гандон', "пиши", "пишите", "в личные сообщения", "писать", "заработать", "заработком", "заработки", "заработай" "бюджет", "плачу", "платим"
+    'хуесос', 'еблан', 'соси', 'пидор', 'залупа', 'шлюха', 'гандон',
+    "пиши", "пишите", "в личные сообщения", "писать", "заработать",
+    "заработком", "заработки", "заработай", "бюджет", "плачу", "платим"
 }
 AD_KEYWORDS = {'работа', 'заработок', 'деньги', '@', 't.me/', '+7', '8-9', "https://"}
 
@@ -60,6 +67,18 @@ async def is_admin(chat_id, user_id, context):
         logging.warning(f"Ошибка при проверке админа: {e}")
         return False
 
+async def extract_text_from_image(file_url):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url) as resp:
+                if resp.status == 200:
+                    img_bytes = await resp.read()
+                    image = Image.open(BytesIO(img_bytes))
+                    return pytesseract.image_to_string(image, lang='rus+eng')
+    except Exception as e:
+        logging.warning(f"Ошибка распознавания изображения: {e}")
+    return ""
+
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.from_user:
@@ -73,10 +92,20 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
+        # Проверка текста и подписи
         if contains_profanity(text) or contains_ads(text) or contains_money(text) or is_emoji_spam(text):
             await msg.delete()
-            logging.info(f"Удалено сообщение от {user_id} (текст)")
+            logging.info(f"Удалено сообщение от {user_id} (по тексту)")
             return
+
+        # Проверка текста на изображении
+        if msg.photo:
+            file = await context.bot.get_file(msg.photo[-1].file_id)
+            img_text = await extract_text_from_image(file.file_path)
+            if contains_profanity(img_text) or contains_ads(img_text) or contains_money(img_text):
+                await msg.delete()
+                logging.info(f"Удалено фото от {user_id} (по изображению)")
+                return
     except Exception as e:
         logging.warning(f"Ошибка удаления сообщения: {e}")
 
@@ -111,17 +140,14 @@ async def main():
 
     runner = web.AppRunner(aio_app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8443)))
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
     await site.start()
 
     logging.info("✅ Сервер запущен")
     await app.initialize()
     await app.start()
-    webhook_url = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/{BOT_TOKEN}"
-    await app.bot.set_webhook(url=webhook_url)
-    await app.start()
-    await app.updater.start()
-    await app.wait_until_shutdown()
-    await app.stop()
+    await app.updater.start_polling()
+    await app.updater.idle()
+
 if __name__ == "__main__":
     asyncio.run(main())
