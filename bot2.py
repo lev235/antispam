@@ -155,7 +155,7 @@ async def create_app():
 
     app = web.Application()
     app['bot_app'] = telegram_app
-    app.router.add_post(f"/{bot_token}", handle_webhook)
+    app.router.add_post("/", handle_webhook)
     app.router.add_get('/ping', handle_ping)
 
     return app
