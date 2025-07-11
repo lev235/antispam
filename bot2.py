@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from aiohttp import web
 from telegram import Update, ChatMember
 from telegram.ext import (
-    ApplicationBuilder, MessageHandler, ContextTypes, filters
+    ApplicationBuilder, MessageHandler, ContextTypes, filters, Application
 )
 
 logging.basicConfig(
@@ -22,6 +22,11 @@ BAD_WORDS = {
     'fuck', 'shit', 'asshole', 'fucking', 'bitch', 'bastard', 'nigger', 'faggot'
 }
 
+AD_KEYWORDS = {
+    'работа', 'заработок', '1400₽', 'удалённо', 'деньги',
+    'лёгкие задачи', 'подпишись', 'пиши в лс', '@', 't.me/', 'клиенты'
+}
+
 def build_bad_word_patterns(words: set) -> list:
     patterns = []
     for word in words:
@@ -30,11 +35,6 @@ def build_bad_word_patterns(words: set) -> list:
     return patterns
 
 BAD_WORD_PATTERNS = build_bad_word_patterns(BAD_WORDS)
-
-AD_KEYWORDS = {
-    'работа', 'заработок', '1400₽', 'удалённо', 'деньги',
-    'лёгкие задачи', 'подпишись', 'пиши в лс', '@', 't.me/', 'клиенты'
-}
 
 def contains_profanity(text: str) -> bool:
     for pattern in BAD_WORD_PATTERNS:
@@ -56,7 +56,7 @@ def contains_ads(text: str) -> bool:
     return any(word in lower_text for word in AD_KEYWORDS)
 
 FLOOD_LIMIT = 3
-FLOOD_INTERVAL = 10  # секунд
+FLOOD_INTERVAL = 10
 
 def is_flooding(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     now = datetime.now()
@@ -105,7 +105,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         has_media = message.photo or message.video or message.document or message.animation
 
-        # Удаляем медиа-сообщения без подписи (caption)
         if has_media and not text.strip():
             await message.delete()
             logging.info(f"Удалено медиа-сообщение от {user_id} (без подписи)")
@@ -122,48 +121,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.warning(f"Не удалось забанить пользователя: {e}")
 
-# --- Веб-сервер для Webhook и пинга ---
+# ------------------- AIOHTTP SERVER -------------------------
+
 async def handle_webhook(request):
     app = request.app['bot_app']
     data = await request.json()
     update = Update.de_json(data, app.bot)
-    await app.update_queue.put(update)
+    await app.process_update(update)
     return web.Response(text='OK')
 
 async def handle_ping(request):
     return web.Response(text='pong')
 
-async def on_startup(app):
-    bot_app = app['bot_app']
-    # Устанавливаем webhook (замени URL на свой реальный)
-    webhook_url = os.getenv("WEBHOOK_URL")
-    if webhook_url:
-        await bot_app.bot.set_webhook(webhook_url)
-        logging.info(f"Webhook установлен: {webhook_url}")
-    else:
-        logging.warning("WEBHOOK_URL не задан, webhook не установлен!")
-
 async def create_app():
     bot_token = os.getenv("BOT_TOKEN")
+    webhook_url = os.getenv("WEBHOOK_URL")
+
     if not bot_token:
-        raise RuntimeError("Укажи BOT_TOKEN в переменных окружения")
+        raise RuntimeError("BOT_TOKEN не задан в переменных окружения")
+    if not webhook_url:
+        raise RuntimeError("WEBHOOK_URL не задан в переменных окружения")
+
+    # Создаём Telegram Application вручную
+    telegram_app: Application = ApplicationBuilder().token(bot_token).build()
+    telegram_app.add_handler(MessageHandler(filters.ALL, handle_message))
+
+    # Инициализация Telegram-приложения (иначе сообщения не обрабатываются)
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.bot.set_webhook(webhook_url)
+
+    logging.info(f"Webhook установлен: {webhook_url}")
 
     app = web.Application()
-
-    application = ApplicationBuilder().token(bot_token).build()
-    application.add_handler(MessageHandler(filters.ALL, handle_message))
-
-    app['bot_app'] = application
-
+    app['bot_app'] = telegram_app
     app.router.add_post(f"/{bot_token}", handle_webhook)
     app.router.add_get('/ping', handle_ping)
-
-    app.on_startup.append(on_startup)
 
     return app
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
-    web_app = create_app()
     logging.info(f"Запуск сервера на порту {port}")
-    web.run_app(web_app, port=port)
+    web.run_app(create_app(), port=port)
