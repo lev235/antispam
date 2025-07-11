@@ -2,18 +2,17 @@ import os
 import logging
 import re
 from datetime import datetime, timedelta
+from aiohttp import web
 from telegram import Update, ChatMember
 from telegram.ext import (
     ApplicationBuilder, MessageHandler, ContextTypes, filters
 )
 
-# --- Логгирование ---
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
 
-# --- Матерные слова ---
 BAD_WORDS = {
     'хуй', 'хyй', 'хуи', 'хуя', 'хуе', 'хуё', 'хуй', 'хуем', 'хуев', 'хуёв',
     'пизда', 'пиздец', 'пизду', 'пизд', 'пезд', 'пиздюк',
@@ -32,7 +31,6 @@ def build_bad_word_patterns(words: set) -> list:
 
 BAD_WORD_PATTERNS = build_bad_word_patterns(BAD_WORDS)
 
-# --- Рекламные слова ---
 AD_KEYWORDS = {
     'работа', 'заработок', '1400₽', 'удалённо', 'деньги',
     'лёгкие задачи', 'подпишись', 'пиши в лс', '@', 't.me/', 'клиенты'
@@ -57,7 +55,6 @@ def contains_ads(text: str) -> bool:
     lower_text = text.lower()
     return any(word in lower_text for word in AD_KEYWORDS)
 
-# --- Антифлуд ---
 FLOOD_LIMIT = 3
 FLOOD_INTERVAL = 10  # секунд
 
@@ -70,7 +67,6 @@ def is_flooding(user_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE) 
     context.chat_data[key] = history
     return len(history) >= FLOOD_LIMIT
 
-# --- Проверка: является ли пользователь админом ---
 async def is_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
         member = await context.bot.get_chat_member(chat_id, user_id)
@@ -79,7 +75,6 @@ async def is_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYP
         logging.warning(f"Ошибка при проверке статуса админа: {e}")
         return False
 
-# --- Обработка сообщений ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message or not message.from_user:
@@ -93,7 +88,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Проверка текста и подписи
         if contains_profanity(text):
             await message.delete()
             logging.info(f"Удалено сообщение от {user_id} (мат)")
@@ -109,18 +103,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.info(f"Удалено сообщение от {user_id} (эмодзи-спам)")
             return
 
-        # Проверка на наличие медиа (фото, видео, документ, гиф)
         has_media = message.photo or message.video or message.document or message.animation
 
-        if has_media:
+        # Удаляем медиа-сообщения без подписи (caption)
+        if has_media and not text.strip():
             await message.delete()
-            logging.info(f"Удалено медиа-сообщение от {user_id} (без подписи или по умолчанию)")
+            logging.info(f"Удалено медиа-сообщение от {user_id} (без подписи)")
             return
 
     except Exception as e:
         logging.warning(f"Ошибка при удалении: {e}")
 
-    # Антифлуд
     if is_flooding(user_id, chat_id, context):
         try:
             await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
@@ -129,12 +122,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.warning(f"Не удалось забанить пользователя: {e}")
 
-# --- Основной запуск ---
-if __name__ == '__main__':
-    BOT_TOKEN = os.getenv("BOT_TOKEN") or "ТВОЙ_ТОКЕН_ОТ_BOTFATHER"
+# --- Веб-сервер для Webhook и пинга ---
+async def handle_webhook(request):
+    app = request.app['bot_app']
+    data = await request.json()
+    update = Update.de_json(data, app.bot)
+    await app.update_queue.put(update)
+    return web.Response(text='OK')
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
+async def handle_ping(request):
+    return web.Response(text='pong')
 
-    print("🤖 Бот запущен...")
-    app.run_polling()
+async def on_startup(app):
+    bot_app = app['bot_app']
+    # Устанавливаем webhook (замени URL на свой реальный)
+    webhook_url = os.getenv("WEBHOOK_URL")
+    if webhook_url:
+        await bot_app.bot.set_webhook(webhook_url)
+        logging.info(f"Webhook установлен: {webhook_url}")
+    else:
+        logging.warning("WEBHOOK_URL не задан, webhook не установлен!")
+
+async def create_app():
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        raise RuntimeError("Укажи BOT_TOKEN в переменных окружения")
+
+    app = web.Application()
+
+    application = ApplicationBuilder().token(bot_token).build()
+    application.add_handler(MessageHandler(filters.ALL, handle_message))
+
+    app['bot_app'] = application
+
+    app.router.add_post(f"/{bot_token}", handle_webhook)
+    app.router.add_get('/ping', handle_ping)
+
+    app.on_startup.append(on_startup)
+
+    return app
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8080"))
+    web_app = create_app()
+    logging.info(f"Запуск сервера на порту {port}")
+    web.run_app(web_app, port=port)
